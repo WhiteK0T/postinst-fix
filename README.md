@@ -19,8 +19,9 @@
 
 ## 🚀 Установка и использование
 
-### 1. Подготовка
+### 1. Скачайте и сделайте скрипт исполняемым
 ```bash
+curl -fsS Lhttps://raw.githubusercontent.com/WhiteK0T/postinst-fix/refs/heads/main/postinst-fix.sh -o postinst-fix.sh
 chmod +x postinst_fix.sh
 ```
 
