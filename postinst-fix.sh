@@ -1,44 +1,81 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-# Настройки
-logfile="$HOME/postinst_fix.log"
-target_pattern="systemd-sysusers"
-replacement_suffix=".conf || true"
+# ================= НАСТРОЙКИ =================
+LOGFILE="$HOME/postinst_fix.log"
+TARGET_PATTERN="systemd-sysusers"
+SUFFIX=" || true"
+DRY_RUN=false
+BACKUP_DIR="/tmp/postinst_backups_$(date +%Y%m%d_%H%M%S)"
 
-# Очистка лога
-: > "$logfile"
+# ================= ПАРСИНГ АРГУМЕНТОВ =================
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --dry-run|-n) DRY_RUN=true; shift ;;
+        *) echo "Использование: $0 [--dry-run]"; exit 1 ;;
+    esac
+done
 
-# Проверка, существуют ли файлы вообще
+# ================= ПРОВЕРКА ПРАВ =================
+if [[ $EUID -ne 0 ]]; then
+    echo "❌ Ошибка: скрипт должен быть запущен от root (или через sudo)." >&2
+    exit 1
+fi
+
+# ================= ИНИЦИАЛИЗАЦИЯ =================
+: > "$LOGFILE"
+exec >> "$LOGFILE" 2>&1
+
+log() { printf "[%s] %s\n" "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
+
+log "🚀 Запуск обработки..."
+
 shopt -s nullglob
 files=(/var/lib/dpkg/info/*.postinst)
 
-if [ ${#files[@]} -eq 0 ]; then
-    echo "No .postinst files found." | tee -a "$logfile"
+if [[ ${#files[@]} -eq 0 ]]; then
+    log "⚠️ Файлы .postinst не найдены."
     exit 0
 fi
 
-echo "Starting processing at $(date)" >> "$logfile"
+modified_count=0
 
+# ================= ОБРАБОТКА ФАЙЛОВ =================
 for f in "${files[@]}"; do
-    # Ищем строки, где есть systemd-sysusers, но НЕТ уже добавленного || true
-    # Это предотвращает повторную модификацию одного и того же файла
-    mapfile -t matches < <(grep "$target_pattern" "$f" | grep -v "|| true")
+    # Ищем строки с паттерном, которые ещё не содержат " || true"
+    # || true предотвращает падение скрипта при отсутствии совпадений (set -e)
+    mapfile -t matches < <(grep -F "$TARGET_PATTERN" "$f" 2>/dev/null | grep -v "|| true" || true)
 
-    if [ ${#matches[@]} -gt 0 ]; then
-        echo "=== $f ===" >> "$logfile"
-        echo "--- CHANGING ---" >> "$logfile"
-        
-        for line in "${matches[@]}"; do
-            echo "Old: $line" >> "$logfile"
-            echo "New: $(echo "$line" | sed "s/\.conf$/$replacement_suffix/")" >> "$logfile"
-        done
+    [[ ${#matches[@]} -eq 0 ]] && continue
 
-        # Выполняем замену только в тех строках, где есть паттерн
-        sudo sed -i "/$target_pattern/s/\.conf$/$replacement_suffix/" "$f";
-        
-        echo "Status: Modified" >> "$logfile"
-        echo "" >> "$logfile"
+    log "📄 === $f ==="
+    log "📝 --- ИЗМЕНЕНИЯ ---"
+
+    for line in "${matches[@]}"; do
+        if [[ "$line" =~ \.conf$ ]]; then
+            log "  ➜ Старая: $line"
+            log "  ➜ Новая:  ${line}${SUFFIX}"
+        else
+            log "  ⏭ Пропущена (не заканчивается на .conf): $line"
+        fi
+    done
+
+    if [[ "$DRY_RUN" == true ]]; then
+        log "🧪 Статус: РЕЖИМ ПРОБЕГА (файлы не изменены)"
+    else
+        # Создаём директорию для бэкапов один раз
+        mkdir -p "$BACKUP_DIR"
+        cp -p "$f" "$BACKUP_DIR/$(basename "$f")"
+
+        # Применяем изменение только к строкам, содержащим паттерн и заканчивающимся на .conf
+        if sed -i "/${TARGET_PATTERN}/ s/\.conf$/\.conf${SUFFIX}/" "$f"; then
+            log "✅ Статус: Успешно изменен (бэкап: $BACKUP_DIR/$(basename "$f"))"
+            ((modified_count++)) || true
+        else
+            log "❌ Статус: ОШИБКА при изменении"
+        fi
     fi
+    log ""
 done
 
-echo "Done. Check $logfile for details."
+log "🏁 Готово. Изменено файлов: $modified_count. Подробности в $LOGFILE"
